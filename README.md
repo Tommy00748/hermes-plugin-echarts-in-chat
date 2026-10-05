@@ -1,24 +1,14 @@
 # echarts-in-chat
 
-Render ```` ```echarts ```` code blocks in the Hermes Desktop conversation stream
-as **live, interactive charts** — zoomable, legend-filterable, resize-aware.
+Render a chart **inline in a Hermes Desktop assistant message** — zoomable,
+legend-filterable, resize-aware — through the official
+[Desktop Plugin SDK](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk)
+transcript-directive slot.
 
-A desktop plugin for the
-[`@hermes/plugin-sdk`](https://hermes-agent.nousresearch.com/docs/developer-guide/desktop-plugin-sdk).
-
-## What it demonstrates
-
-- **Message-stream DOM injection** — turning a rendered code block into a live
-  component inside the chat (a pure-frontend plugin pattern).
-- **Surviving reloads** — a global singleton so repeated ⌘K reloads never stack
-  duplicate observers or double-process blocks.
-- **Race-free claiming** — `pre.replaceWith(div)` happens synchronously in the
-  scan callback, so stale plugin instances can never steal a block mid-await.
-- **Shiki quirks** — content sniffing (shiki renders no language label),
-  the 120px scroll wrapper trap, and async-highlight observation via
-  full-body scans + debounce + interval backstop.
-- **Blob-URL reality** — plugins execute from a `blob:file://` URL, so relative
-  imports fail; the optional local ECharts file is loaded by absolute path.
+A plugin registers a named directive with `TRANSCRIPT_DIRECTIVE_AREA`; the model
+addresses it by emitting a paragraph of the form `::echarts{...}`, and the host
+mounts this plugin's React component in its place. The plugin never touches the
+app's markup, never injects a script, and loads no remote code.
 
 ## Install
 
@@ -39,73 +29,88 @@ git clone https://github.com/Tommy00748/hermes-plugin-echarts-in-chat \
 ```
 
 Then enable it in **Desktop → Capabilities → Plugins** (or ⌘K → **Reload
-desktop plugins**) and restart the app if the chat does not pick it up.
-
-If you only want the desktop half, you can also drop it into the standalone
-desktop-plugin root: copy `desktop/plugin.js` and `vendor/` to
-`~/.hermes/desktop-plugins/echarts-in-chat/`.
+desktop plugins**) and restart the app if the message stream does not pick it up.
 
 ## Usage
 
-In any chat message, include a code block with language `echarts` whose content
-is a valid ECharts option JSON:
+In an assistant message, emit a directive paragraph:
 
 ````markdown
-```echarts
-{
-  "title": { "text": "Weekly sales", "left": "center" },
-  "tooltip": {},
-  "legend": { "bottom": 0 },
-  "xAxis": { "type": "category", "data": ["Mon", "Tue", "Wed", "Thu", "Fri"] },
-  "yAxis": { "type": "value" },
-  "dataZoom": [{ "type": "slider" }],
-  "series": [{ "type": "bar", "data": [120, 200, 150, 80, 70] }]
-}
-```
+::echarts{labels="Mon,Tue,Wed,Thu,Fri" values="120,200,150,80,70" type="bar" title="Weekly sales"}
 ````
 
-The block is replaced by a 400px-tall interactive chart (option
-`"hermesHeight"` overrides, clamped to 280–560px).
+Multi-series (bar and line can be mixed):
 
-## ECharts loading
+````markdown
+::echarts{labels="Mon,Tue,Wed,Thu,Fri" series="Sales:bar:120,200,150,80,70;Cost:line:60,90,70,40,35"}
+````
 
-The plugin loads ECharts from the jsDelivr CDN by default. For offline use or
-slow networks, download `echarts.min.js` (v5.5.0, Apache-2.0) into the plugin's
-`vendor/` folder and set `ECHARTS_LOCAL_VENDOR` at the top of
-`desktop/plugin.js` to its absolute `file://` path.
+Pie / donut, taller, zoom always on:
+
+````markdown
+::echarts{labels="Direct,Search,Social,Email" values="420,310,180,90" type="pie" height="420"}
+````
+
+### Directive attributes
+
+| Attribute | Meaning |
+|-----------|---------|
+| `labels`  | comma-separated category names (x axis, or pie slice names) |
+| `values`  | comma-separated numbers — single series |
+| `name`    | single-series name (used with `values`) |
+| `series`  | `name:type:v1,v2,...` entries separated by `;` — multi series |
+| `type`    | default series type for entries without one: `bar` \| `line` \| `pie` |
+| `title`   | optional chart title |
+| `height`  | optional pixel height, clamped to 280–560 (default 400) |
+| `zoom`    | `"true"` / `"false"` — the dataZoom slider (default: on when > 10 categories) |
+
+The host's directive grammar does not allow `{` or `}` inside the attribute
+body, so a raw ECharts option JSON cannot be passed; the values are given as
+plain attribute lists instead.
+
+### Interactions
+
+- **Zoom (dataZoom)** — the slider under the plot: drag the window to pan,
+  drag either handle to resize, or scroll the wheel over the plot. Defaults on
+  for more than 10 categories.
+- **Legend filter** — click a legend item to hide/show that series or slice.
+- **Resize-aware** — a `ResizeObserver` on the chart's own element re-lays the
+  SVG out when the message column changes width.
+- **Tooltip** — hovering a category shows each visible series' value.
+- **Height override** — `height` is clamped to 280–560px.
+- **Multi-instance safe** — every directive is its own React component with no
+  shared global state, so two charts in one message can never interfere.
 
 ## Disclosure (what this plugin does to your machine)
 
-In the spirit of the Hermes catalog admission rules, this plugin discloses:
+- **Network calls.** None. The chart is drawn locally as inline SVG. There is no
+  CDN, no fetch, and no telemetry.
+- **Reads/writes outside the plugin's own data.** None. It renders only the
+  directive it was handed; it does not read or modify the transcript, the app's
+  stores, or any files.
+- **Shell commands.** None.
+- **Background processes.** None. While a chart is mounted it keeps a
+  `ResizeObserver` on its own container and a wheel listener for zoom; both are
+  removed when the component unmounts. There is no `setInterval`.
+- **Stored credentials / env vars.** None.
 
-- **Third-party network calls.** On the first chart it renders, it fetches
-  ECharts 5.5.0 from `https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js`
-  by injecting a `<script>` tag. Nothing else is sent anywhere — no telemetry,
-  no analytics, no account data. Set `ECHARTS_LOCAL_VENDOR` to a local
-  `echarts.min.js` path to avoid the CDN entirely (the shipped
-  `vendor/echarts.min.js` is bundled for exactly this).
-- **Reads/writes outside the plugin's own data.** It observes the Desktop
-  chat transcript DOM (`document.body` MutationObserver) and replaces
-  `<pre>` blocks whose content is ECharts option JSON with chart containers.
-  It also adds one global CSS rule so the chart is not clipped by the code
-  block's 120px scroll wrapper.
-- **Background activity.** While enabled it keeps a MutationObserver and a
-  3-second `setInterval` scan running to catch virtualized list re-creations.
-- **Shell commands.** None. The plugin never runs shell commands.
-- **Stored credentials.** None. It reads no environment variables and stores
-  no secrets.
+## Why there is no ECharts and no ```` ```echarts ```` code fence
 
-## Catalog status
+v1 of this plugin scanned the message stream with a `document.body`
+`MutationObserver`, replaced matching `<pre>` blocks, and loaded ECharts from
+jsDelivr with a `<script>` tag. Hermes catalog admission rule 8 refuses both of
+those moves, and the Desktop runtime loader only resolves `@hermes/plugin-sdk`
+and `react*` (a relative import of a vendored file cannot resolve against the
+`blob:` module base), so an external chart library cannot be loaded at all.
 
-This plugin uses two mechanisms that the Hermes catalog admission rule 8
-(`desktop/plugin.js` stays inside the plugin SDK surface) refuses:
-the `<script>`-tag load from the CDN and the `document.body` MutationObserver.
-`hermes plugins validate` therefore fails the `desktop surface` check, so the
-plugin is published as a standalone repo and is **not** submitted to the
-plugin catalog in this form. Making it catalog-admissible requires an
-SDK-provided way to render a chart component in the transcript (for example
-the transcript-directive area) plus an SDK-provided way to load the chart
-library, instead of a CDN script tag.
+The sanctioned way to put content in the message stream is the SDK's
+transcript-directive slot — which is addressed by `::name{...}`, not by a fenced
+code block, and whose attribute grammar forbids `{`/`}`. This version therefore
+draws the chart itself in SVG and is triggered by `::echarts{...}`. It keeps the
+behaviour the original demonstrated (zoom, legend filter, resize, height
+override) but drops the ECharts library and the code-fence trigger; a
+plugin-accessible fenced-code-block renderer hook would be needed to restore
+that exact interface.
 
 ## License
 

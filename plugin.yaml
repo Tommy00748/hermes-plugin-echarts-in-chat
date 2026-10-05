@@ -1,12 +1,12 @@
 name: echarts-in-chat
-version: 1.0.0
-description: Render ```echarts code blocks in the Hermes Desktop conversation stream as live, interactive charts (zoomable, legend-filterable, resize-aware).
+version: 2.0.0
+description: Render charts inline in Hermes Desktop assistant messages through the SDK transcript-directive slot (::echarts{...}) — zoomable, legend-filterable, resize-aware. No network, no shell, no credentials.
 manifest_version: 1
 kind: standalone
 author: Tommy00748
 license: MIT
 homepage: https://github.com/Tommy00748/hermes-plugin-echarts-in-chat
-requires_hermes: ">=0.21"
+requires_hermes: ">=0.21.5"
 capabilities: []
 requires_env: []
 python_dependencies: []
