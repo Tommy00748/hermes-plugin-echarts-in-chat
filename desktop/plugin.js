@@ -54,13 +54,13 @@ const MIN_SPAN = 2
 // no colour is ever hardcoded.
 const COLORS = [
   'var(--ui-accent)',
-  'var(--ui-blue, #4f8cff)',
+  'var(--ui-purple, #c86bff)',
   'var(--ui-green, #39c07b)',
   'var(--ui-orange, #ff8a4f)',
-  'var(--ui-purple, #c86bff)',
   'var(--ui-cyan, #4fd1d1)',
   'var(--ui-red, #ff6b6b)',
-  'var(--ui-yellow, #ffcf4f)'
+  'var(--ui-yellow, #ffcf4f)',
+  'var(--ui-blue, #4f8cff)'
 ]
 
 const colorAt = index => COLORS[((index % COLORS.length) + COLORS.length) % COLORS.length]
