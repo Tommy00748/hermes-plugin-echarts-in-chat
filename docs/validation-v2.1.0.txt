@@ -1,0 +1,62 @@
+echarts-in-chat v2.1.0 — 本机验收留档
+生成时间（本机）: 2026-10-05 15:58:30 CST
+Hermes: Hermes Agent vgit.be5e9f7 (2026.9.24) · upstream be5e9f72
+
+$ node --test tests/
+✔ invalid data renders a readable error block, not a blank area (1.345084ms)
+✔ an illegal type renders an error that lists the valid types (0.106541ms)
+✔ while the message streams, an incomplete directive shows a settling state (0.098458ms)
+✔ a valid chart renders an accessible readout with keyboard instructions (0.31525ms)
+✔ pie readout reports the active slice and its share (0.075833ms)
+✔ empty-state text is English-consistent for an all-hidden xy chart (0.065417ms)
+✔ legacy single-series syntax still parses unchanged (1.146209ms)
+✔ legacy multi-series syntax (name:type:data;...) still parses (0.152792ms)
+✔ two-part series entries get the default type (0.079625ms)
+✔ single-series name attribute is honoured, default Value (0.106708ms)
+✔ compact: inclusive integer ranges expand ascending and descending (0.081792ms)
+✔ compact: ranges work inside values, series bodies and labels (0.141584ms)
+✔ compact: whitespace and comma are interchangeable for numbers (0.098042ms)
+✔ compact: whitespace separates labels only when no comma is present (0.050958ms)
+✔ splitTokens drops empties and trims (0.056791ms)
+✔ expandRangeToken returns null for non-ranges (0.086209ms)
+✔ error: labels/values length mismatch names both counts (0.165375ms)
+✔ error: series length mismatch names the offending series (0.100375ms)
+✔ error: unparsable number names the token (0.099709ms)
+✔ error: illegal type names it and lists the valid ones (0.061416ms)
+✔ error: illegal per-series type is reported too (0.053959ms)
+✔ error: no data at all is reported, never a blank spec (0.03475ms)
+✔ error: malformed series entry names its position (0.040041ms)
+✔ guard: a huge range is refused, not expanded (0.061417ms)
+✔ errors are deduplicated (0.065166ms)
+✔ no labels: categories are generated from the data length (0.048833ms)
+✔ pie kind is selected by type, by per-series type, or by series mix (0.057708ms)
+✔ zoom default is on past 10 categories, overridable either way (0.099083ms)
+✔ height is clamped and a non-numeric height warns (0.049167ms)
+✔ serializeDirective rebuilds a copyable directive (0.026625ms)
+✔ render-layer pure helpers (0.188917ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 55.953125
+
+$ hermes plugins validate . --install-deps
+
+✓ manifest — plugin.yaml parses
+✓ manifest fields — name, version, description present
+✓ requires_hermes — spec '>=0.21.5' parses
+✓ config schema — not declared
+✓ requires_env — all entries UPPER_SNAKE
+✓ loadable — entry: desktop/plugin.js
+✓ python dependencies — none declared
+✓ capability probe — skipped (no __init__.py)
+✓ built-in tool collisions — no tools to check
+✓ security scan — safe
+✓ no core override — no runtime rebinds of Hermes core
+✓ desktop surface — stays inside the plugin SDK surface
+⚠ no __init__.py — capability probe skipped (manifest-only plugin)
+
+Validation passed.

@@ -1,5 +1,5 @@
 name: echarts-in-chat
-version: 2.0.0
+version: 2.1.0
 description: Render charts inline in Hermes Desktop assistant messages through the SDK transcript-directive slot (::echarts{...}) — zoomable, legend-filterable, resize-aware. No network, no shell, no credentials.
 manifest_version: 1
 kind: standalone

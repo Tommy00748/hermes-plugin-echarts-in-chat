@@ -18,6 +18,14 @@
  *   the chart itself as an inline SVG React component and never injects
  *   anything. See README for the full rationale and the feature mapping.
  *
+ * v2.1 NOTES
+ *   - Hover tooltip now draws a crosshair + point highlight and has a keyboard /
+ *     touch equivalent (arrow keys, tap, and an aria-live readout).
+ *   - Invalid data renders a readable Chinese error block (naming which item does
+ *     not line up) instead of a blank area, keeping the raw directive copyable.
+ *   - Compact data syntax: `1..12` ranges and whitespace as a separator, on top of
+ *     the original comma form. The old labels/values/series spelling still works.
+ *
  * DIRECTIVE GRAMMAR (attributes are untrusted strings; `{`/`}` are not allowed
  * inside the body by the host parser, so a raw JSON option cannot be passed —
  * the data is passed as plain attribute lists):
@@ -25,9 +33,10 @@
  *   ::echarts{labels="Mon,Tue,Wed" values="120,200,150" type="bar" title="Sales"}
  *   ::echarts{labels="Mon,Tue,Wed" series="Sales:bar:120,200,150;Cost:line:80,90,70"}
  *   ::echarts{labels="A,B,C" values="3,5,2" type="pie" height="420" zoom="false"}
+ *   ::echarts{labels="1..12" values="1 4 9 16 25 36 49 64 81 100 121 144"}
  *
- *   labels  comma-separated category names (x axis, or pie slice names)
- *   values  comma-separated numbers (single series)
+ *   labels  category names (x axis, or pie slice names); comma- or space-separated
+ *   values  numbers for a single series; comma- or space-separated, `a..b` ranges
  *   series  `name:type:v1,v2,...` entries separated by `;` (multi series)
  *   type    default series type for entries without one: bar | line | pie
  *   name    single-series name (used with `values`)
@@ -37,10 +46,13 @@
  *
  * IMPORTS: only `@hermes/plugin-sdk`, `react` and `react/jsx-runtime`, which is
  * exactly what the runtime loader allows. No timers, no document observers, no
- * script tags, no app-internal markup queries.
+ * script tags, no app-internal markup queries. The parser below is pure and
+ * deliberately kept in this file: a Desktop plugin cannot import a sibling
+ * module (a relative specifier fails the loader allowlist), so the test harness
+ * loads this file with stubbed imports instead of importing a shared parser.
  */
 
-import { TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
+import * as sdk from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
@@ -49,6 +61,11 @@ const MAX_H = 560
 const DEFAULT_H = 400
 /** Keep at least this many categories in the zoom window (clamped to the data). */
 const MIN_SPAN = 2
+/** Bounds so a hostile / typo'd directive can't allocate unbounded work. */
+const MAX_CATEGORIES = 2000
+const MAX_RANGE = 1000
+const CHART_TYPES = ['bar', 'line', 'pie']
+const TYPE_HELP = 'bar、line、pie'
 
 // The theme's own categorical tokens, so the chart reskins with every theme and
 // no colour is ever hardcoded.
@@ -64,7 +81,7 @@ const COLORS = [
 ]
 
 const colorAt = index => COLORS[((index % COLORS.length) + COLORS.length) % COLORS.length]
-const clamp = (value, low, high) => Math.min(high, Math.max(low, value))
+export const clamp = (value, low, high) => Math.min(high, Math.max(low, value))
 const truncate = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' : text)
 
 const toNumber = (value, fallback) => {
@@ -72,55 +89,231 @@ const toNumber = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-const normalizeType = value => {
-  const type = String(value == null ? '' : value).trim().toLowerCase()
-  return type === 'line' || type === 'pie' ? type : 'bar'
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure parsing layer (no React, no SDK) — the unit under test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Split an attribute list into tokens.
+ *
+ * Numbers accept commas and whitespace interchangeably. Labels keep a multi-word
+ * label intact when a comma is present (`"New York, LA"` → 2 labels); with no
+ * comma, whitespace is the separator (`"Mon Tue Wed"` → 3 labels).
+ */
+export function splitTokens(raw, options = {}) {
+  const text = String(raw == null ? '' : raw).trim()
+  if (!text) return []
+  const hasComma = text.includes(',') || text.includes('，')
+  const pattern = options.label ? (hasComma ? /[,，]+/ : /\s+/) : /[,，\s]+/
+  return text
+    .split(pattern)
+    .map(token => token.trim())
+    .filter(token => token.length > 0)
 }
 
-function parseNumberList(raw) {
-  return String(raw == null ? '' : raw)
-    .split(',')
-    .map(part => Number(part.trim()))
-    .filter(parsed => Number.isFinite(parsed))
+/**
+ * Expand an inclusive integer range token like `1..12` or `5..-2`.
+ * Returns `null` when the token is not a range, `{ values }` on success, or
+ * `{ error }` when the range would expand past MAX_RANGE points.
+ */
+export function expandRangeToken(token) {
+  const match = /^(-?\d+)\s*\.\.\s*(-?\d+)$/.exec(String(token == null ? '' : token).trim())
+  if (!match) return null
+  const from = Number(match[1])
+  const to = Number(match[2])
+  const count = Math.abs(to - from) + 1
+  if (count > MAX_RANGE) {
+    return { error: `区间「${token}」展开后有 ${count} 个点，超过上限 ${MAX_RANGE}` }
+  }
+  const step = from <= to ? 1 : -1
+  const values = []
+  for (let value = from; step > 0 ? value <= to : value >= to; value += step) values.push(value)
+  return { values }
+}
+
+/**
+ * Parse a number list, expanding ranges. Returns `{ values, bad }` where each
+ * `bad` entry is `{ token, reason }` (reason is null for a plain parse failure).
+ */
+export function parseNumberList(raw) {
+  const values = []
+  const bad = []
+  for (const token of splitTokens(raw)) {
+    const range = expandRangeToken(token)
+    if (range) {
+      if (range.error) bad.push({ token, reason: range.error })
+      else values.push(...range.values)
+      continue
+    }
+    const parsed = Number(token)
+    if (Number.isFinite(parsed)) values.push(parsed)
+    else bad.push({ token, reason: null })
+  }
+  return { values, bad }
+}
+
+/** Parse a label list, expanding numeric ranges and bounding the count. */
+export function parseLabelList(raw) {
+  const labels = []
+  const warnings = []
+  for (const token of splitTokens(raw, { label: true })) {
+    const range = expandRangeToken(token)
+    if (range && !range.error) {
+      for (const value of range.values) labels.push(String(value))
+      continue
+    }
+    if (range && range.error) warnings.push(range.error)
+    else labels.push(token)
+  }
+  if (labels.length > MAX_CATEGORIES) {
+    warnings.push(`分类有 ${labels.length} 个，只渲染前 ${MAX_CATEGORIES} 个`)
+    labels.length = MAX_CATEGORIES
+  }
+  return { labels, warnings }
+}
+
+/** Reconstruct a copyable directive string from parsed attributes. */
+export function serializeDirective(attrs) {
+  const source = attrs || {}
+  const keys = Object.keys(source).filter(key => String(source[key] == null ? '' : source[key]).length > 0)
+  if (!keys.length) return '::echarts{}'
+  return (
+    '::echarts{' +
+    keys.map(key => key + '="' + String(source[key]).replace(/"/g, "'") + '"').join(' ') +
+    '}'
+  )
 }
 
 /**
  * Turn the directive attributes into a chart spec. Pure and synchronous.
- * Returns `{ invalid: true }` when there is nothing usable to draw.
+ *
+ * Returns `{ ok: true, ...spec }` or `{ ok: false, errors, warnings, attrs }`,
+ * where each error carries a user-facing Chinese `message`. The spec always
+ * includes `errors`, `warnings` and `key` so callers can branch on `ok` alone.
  */
-function parseChartSpec(attrs) {
+export function parseChartSpec(attrs) {
   const a = attrs || {}
-  const labels = String(a.labels == null ? '' : a.labels)
-    .split(',')
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-  const defaultType = normalizeType(a.type)
-  const series = []
+  const errors = []
+  const warnings = []
 
-  if (a.series) {
-    for (const entry of String(a.series).split(';')) {
-      const parts = entry.trim().split(':')
-      if (parts.length < 2) continue
-      const name = parts[0].trim() || 'Series ' + (series.length + 1)
-      const type = parts.length >= 3 ? normalizeType(parts[1]) : defaultType
-      const body = parts.length >= 3 ? parts.slice(2).join(':') : parts[1]
-      const data = parseNumberList(body)
-      if (data.length) series.push({ name, type, data })
+  // ── labels ──────────────────────────────────────────────────────────────
+  const labelResult = parseLabelList(a.labels)
+  const labels = labelResult.labels
+  warnings.push(...labelResult.warnings)
+
+  // ── default type ────────────────────────────────────────────────────────
+  let defaultType = 'bar'
+  const rawDefaultType = a.type == null ? '' : String(a.type).trim()
+  if (rawDefaultType) {
+    const type = rawDefaultType.toLowerCase()
+    if (CHART_TYPES.includes(type)) defaultType = type
+    else errors.push({ code: 'bad-type', message: `type 属性「${rawDefaultType}」不是合法类型，可用：${TYPE_HELP}` })
+  }
+
+  // ── single series vs multi series ───────────────────────────────────────
+  const series = []
+  const hasSeries = a.series != null && String(a.series).trim() !== ''
+  const hasValues = a.values != null && String(a.values).trim() !== ''
+
+  if (hasSeries) {
+    const entries = String(a.series)
+      .split(';')
+      .map(entry => entry.trim())
+      .filter(entry => entry.length > 0)
+    if (!entries.length) errors.push({ code: 'bad-series', message: 'series 属性是空的' })
+    entries.forEach((entry, index) => {
+      const parts = entry.split(':')
+      if (parts.length < 2) {
+        errors.push({
+          code: 'bad-series',
+          message: `series 第 ${index + 1} 段「${entry}」缺少数据，格式应为「名称:类型:数据」或「名称:数据」`
+        })
+        return
+      }
+      const name = parts[0].trim() || `Series ${series.length + 1}`
+      let type = defaultType
+      let body
+      if (parts.length >= 3) {
+        const rawType = parts[1].trim()
+        if (rawType) {
+          const lower = rawType.toLowerCase()
+          if (CHART_TYPES.includes(lower)) type = lower
+          else errors.push({ code: 'bad-type', message: `series「${name}」的类型「${rawType}」不是合法类型，可用：${TYPE_HELP}` })
+        }
+        body = parts.slice(2).join(':')
+      } else {
+        body = parts[1]
+      }
+      const parsed = parseNumberList(body)
+      parsed.bad.forEach(item => {
+        errors.push({
+          code: 'bad-number',
+          message: item.reason || `series「${name}」里的「${item.token}」不是数字`
+        })
+      })
+      if (parsed.values.length) series.push({ name, type, data: parsed.values })
+      else errors.push({ code: 'no-data', message: `series「${name}」里没有可用的数字` })
+    })
+  } else if (hasValues) {
+    const parsed = parseNumberList(a.values)
+    parsed.bad.forEach(item => {
+      errors.push({
+        code: 'bad-number',
+        message: item.reason || `values 里的「${item.token}」不是数字`
+      })
+    })
+    if (parsed.values.length) {
+      const name = String(a.name == null ? '' : a.name).trim() || 'Value'
+      series.push({ name, type: defaultType, data: parsed.values })
+    } else {
+      errors.push({ code: 'no-data', message: 'values 里没有可用的数字' })
     }
-  } else if (a.values) {
-    const data = parseNumberList(a.values)
-    if (data.length) {
-      series.push({ name: String(a.name == null || a.name === '' ? 'Value' : a.name), type: defaultType, data })
+  } else {
+    errors.push({
+      code: 'no-data',
+      message: '没有数据：请给 values 或 series，例如 ::echarts{labels="Mon,Tue" values="1,2"}'
+    })
+  }
+
+  // ── labels ↔ data length agreement ──────────────────────────────────────
+  if (labels.length) {
+    for (const s of series) {
+      if (s.data.length !== labels.length) {
+        const subject = series.length === 1 && !hasSeries ? 'values' : `series「${s.name}」`
+        // Latin subject (`values`) takes a space before the CJK verb; the
+        // bracketed series form does not.
+        const joiner = /[A-Za-z0-9]$/.test(subject) ? ' ' : ''
+        errors.push({
+          code: 'length-mismatch',
+          message: `labels 有 ${labels.length} 个，${subject}${joiner}有 ${s.data.length} 个`
+        })
+      }
     }
   }
 
-  if (!series.length) return { invalid: true, key: 'invalid' }
+  if (!series.length) {
+    return {
+      ok: false,
+      errors: dedupeErrors(errors),
+      warnings,
+      attrs: a,
+      key: 'invalid::' + serializeDirective(a)
+    }
+  }
+
+  if (errors.length) {
+    return { ok: false, errors: dedupeErrors(errors), warnings, attrs: a, key: 'invalid::' + serializeDirective(a) }
+  }
 
   const count = Math.max(labels.length, ...series.map(s => s.data.length))
   const categories = []
   for (let i = 0; i < count; i += 1) categories.push(labels[i] != null ? labels[i] : String(i + 1))
 
   const height = clamp(toNumber(a.height, DEFAULT_H), MIN_H, MAX_H)
+  if (a.height != null && String(a.height).trim() !== '' && !Number.isFinite(Number(a.height))) {
+    warnings.push(`height「${a.height}」不是数字，已使用默认 ${DEFAULT_H}`)
+  }
+
   const kind = defaultType === 'pie' || series.some(s => s.type === 'pie') ? 'pie' : 'xy'
 
   const zoomAttr = String(a.zoom == null ? '' : a.zoom).trim().toLowerCase()
@@ -134,18 +327,80 @@ function parseChartSpec(attrs) {
   ].join('|')
 
   return {
-    invalid: false,
+    ok: true,
     key,
     categories,
     series,
     kind,
     height,
     zoom,
-    title: String(a.title == null ? '' : a.title)
+    title: String(a.title == null ? '' : a.title),
+    errors: [],
+    warnings,
+    attrs: a
   }
 }
 
-function formatTick(value) {
+function dedupeErrors(errors) {
+  const seen = new Set()
+  const out = []
+  for (const error of errors) {
+    if (seen.has(error.message)) continue
+    seen.add(error.message)
+    out.push(error)
+  }
+  return out
+}
+
+/** Min/max across the visible series values (pure — used for the y scale). */
+export function valueExtent(seriesList) {
+  let lo = 0
+  let hi = 0
+  let any = false
+  for (const s of seriesList) {
+    for (const value of s.data) {
+      if (!Number.isFinite(value)) continue
+      if (!any) {
+        lo = value
+        hi = value
+        any = true
+      } else {
+        if (value < lo) lo = value
+        if (value > hi) hi = value
+      }
+    }
+  }
+  if (!any) return { lo: 0, hi: 1 }
+  if (lo > 0) lo = 0
+  if (hi < 0) hi = 0
+  if (hi === lo) hi = lo + 1
+  return { lo, hi }
+}
+
+/**
+ * Wrap legend entries into rows that fit `width`. Pure, so the layout can be
+ * tested without a DOM. Each item is `{ label, index }`.
+ */
+export function legendLayout(items, width) {
+  const rows = []
+  let row = []
+  let rowWidth = 0
+  for (const item of items) {
+    const itemWidth = 16 + Math.min(item.label.length, 16) * 6.5 + 14
+    if (row.length && rowWidth + itemWidth > width) {
+      rows.push(row)
+      row = []
+      rowWidth = 0
+    }
+    row.push({ ...item, w: itemWidth })
+    rowWidth += itemWidth
+  }
+  if (row.length) rows.push(row)
+  return rows
+}
+
+/** Compact axis tick formatting. */
+export function formatTick(value) {
   const abs = Math.abs(value)
   if (abs >= 1e9) return (value / 1e9).toFixed(abs >= 1e10 ? 0 : 1) + 'B'
   if (abs >= 1e6) return (value / 1e6).toFixed(abs >= 1e7 ? 0 : 1) + 'M'
@@ -155,7 +410,7 @@ function formatTick(value) {
 }
 
 /** Donut / pie slice path. Angles in radians, clockwise from 3 o'clock. */
-function arcPath(cx, cy, radius, inner, from, to) {
+export function arcPath(cx, cy, radius, inner, from, to) {
   const sweep = to - from
   if (sweep >= Math.PI * 2 - 1e-6) {
     return (
@@ -192,8 +447,139 @@ function arcPath(cx, cy, radius, inner, from, to) {
   )
 }
 
-function ChartWidget({ attrs }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering layer
+// ─────────────────────────────────────────────────────────────────────────────
+
+const visuallyHidden = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0
+}
+
+/** A readable, copyable failure block — never a blank area. */
+function ChartError({ spec, streaming }) {
+  const [copyState, setCopyState] = useState('idle')
+  const raw = spec.raw && spec.raw.trim() ? spec.raw : serializeDirective(spec.attrs)
+
+  if (streaming) {
+    return jsx('div', {
+      className: 'rounded-md border px-3 py-2 text-xs',
+      style: { borderColor: 'var(--ui-stroke-secondary)', color: 'var(--ui-text-tertiary)' },
+      children: 'echarts：正在读取图表数据…'
+    })
+  }
+
+  const onCopy = () => {
+    try {
+      const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null
+      if (clipboard && typeof clipboard.writeText === 'function') {
+        clipboard.writeText(raw).then(
+          () => setCopyState('done'),
+          () => setCopyState('fail')
+        )
+      } else {
+        setCopyState('fail')
+      }
+    } catch (error) {
+      setCopyState('fail')
+    }
+  }
+
+  const copyLabel = copyState === 'done' ? '已复制' : copyState === 'fail' ? '复制失败，请手动选中' : '复制原始指令'
+
+  return jsxs('div', {
+    role: 'alert',
+    className: 'rounded-md border px-3 py-2 text-xs',
+    style: {
+      borderColor: 'var(--ui-red, #ff6b6b)',
+      background: 'var(--ui-bg-elevated, rgba(30,30,34,0.4))',
+      color: 'var(--ui-text-secondary)',
+      display: 'grid',
+      gap: 6
+    },
+    children: [
+      jsx('div', {
+        className: 'font-medium',
+        style: { color: 'var(--ui-red, #ff6b6b)' },
+        children: 'echarts：图表数据有问题，暂不能绘制'
+      }),
+      jsxs('ul', {
+        style: { margin: 0, paddingLeft: 18, display: 'grid', gap: 2 },
+        children: spec.errors.map((error, index) => jsx('li', { children: error.message }, 'err-' + index))
+      }),
+      jsxs('div', {
+        style: { display: 'grid', gap: 4 },
+        children: [
+          jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: '原始指令（可选中或复制后修正）：' }),
+          jsx('pre', {
+            style: {
+              margin: 0,
+              padding: '6px 8px',
+              borderRadius: 4,
+              background: 'var(--ui-bg-editor, rgba(0,0,0,0.15))',
+              color: 'var(--ui-text-primary)',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              userSelect: 'all',
+              fontSize: 11
+            },
+            children: raw
+          }),
+          jsx('button', {
+            type: 'button',
+            onClick: onCopy,
+            style: {
+              justifySelf: 'start',
+              padding: '2px 8px',
+              borderRadius: 4,
+              border: '1px solid var(--ui-stroke-secondary)',
+              background: 'transparent',
+              color: 'var(--ui-text-secondary)',
+              cursor: 'pointer',
+              fontSize: 11
+            },
+            children: copyLabel
+          })
+        ]
+      })
+    ]
+  })
+}
+
+function readoutFor(spec, active) {
+  if (active == null || active < 0 || active >= spec.categories.length) {
+    const seriesCount = spec.kind === 'pie' ? spec.categories.length : spec.series.length
+    const unit = spec.kind === 'pie' ? '个切片' : '条系列'
+    return `共 ${spec.categories.length} 个分类、${seriesCount} ${unit}。悬停数据点，或用 Tab 聚焦后按 ← / → 查看数值。`
+  }
+  const category = String(spec.categories[active])
+  if (spec.kind === 'pie') {
+    const value = spec.series[0] ? spec.series[0].data[active] : NaN
+    const total = spec.series[0]
+      ? spec.series[0].data.reduce((sum, v) => sum + (Number.isFinite(v) && v > 0 ? v : 0), 0)
+      : 0
+    const share = total > 0 && Number.isFinite(value) ? '（' + ((value / total) * 100).toFixed(1) + '%）' : ''
+    return category + '：' + (Number.isFinite(value) ? formatTick(value) : '—') + share
+  }
+  const parts = spec.series
+    .map(s => {
+      const value = s.data[active]
+      return s.name + '：' + (Number.isFinite(value) ? formatTick(value) : '—')
+    })
+    .join('，')
+  return category + ' — ' + parts
+}
+
+function ChartWidget({ attrs, source, streaming }) {
   const spec = useMemo(() => parseChartSpec(attrs), [attrs])
+  const withRaw = spec.ok ? spec : { ...spec, raw: source }
   const hostRef = useRef(null)
   const plotRef = useRef(null)
   const dragRef = useRef(null)
@@ -201,20 +587,20 @@ function ChartWidget({ attrs }) {
   const [width, setWidth] = useState(0)
   const [view, setView] = useState({ start: 0, span: 1 })
   const [hidden, setHidden] = useState({})
-  const [hover, setHover] = useState(null)
+  const [active, setActive] = useState(null)
 
-  const n = spec.invalid ? 0 : spec.categories.length
+  const n = withRaw.ok ? withRaw.categories.length : 0
   const minSpan = Math.min(MIN_SPAN, Math.max(1, n))
   const span = n > 0 ? clamp(view.span, minSpan, n) : 0
   const start = n > 0 ? clamp(view.start, 0, n - span) : 0
-  const showZoom = !spec.invalid && spec.kind === 'xy' && spec.zoom && n > minSpan
+  const showZoom = withRaw.ok && withRaw.kind === 'xy' && withRaw.zoom && n > minSpan
 
   // Re-seed the view whenever the addressed data changes.
   useEffect(() => {
     setView({ start: 0, span: Math.max(1, n) })
     setHidden({})
-    setHover(null)
-  }, [spec.key, n])
+    setActive(null)
+  }, [withRaw.key, n])
 
   // Width follows the message column. Observing only our own host element.
   useEffect(() => {
@@ -247,50 +633,53 @@ function ChartWidget({ attrs }) {
     return () => el.removeEventListener('wheel', onWheel)
   }, [showZoom, start, span, minSpan, n])
 
-  if (spec.invalid) {
-    return jsx('div', {
-      className: 'rounded-md border px-3 py-2 text-xs',
-      style: { borderColor: 'var(--ui-stroke-secondary)', color: 'var(--ui-text-tertiary)' },
-      children: 'echarts: give me data — e.g. ::echarts{labels="Mon,Tue" values="1,2"}'
-    })
+  if (!withRaw.ok) {
+    return jsx(ChartError, { spec: withRaw, streaming })
   }
 
   const toggle = index => setHidden(prev => ({ ...prev, [index]: !prev[index] }))
 
-  const H = spec.height
-  const hasTitle = spec.title.length > 0
+  const H = withRaw.height
+  const hasTitle = withRaw.title.length > 0
   const padLeft = 46
   const padRight = 14
   const innerW = Math.max(10, width - padLeft - padRight)
 
   const legendItems =
-    spec.kind === 'pie'
-      ? spec.categories.map((label, index) => ({ label, index }))
-      : spec.series.map((s, index) => ({ label: s.name, index }))
+    withRaw.kind === 'pie'
+      ? withRaw.categories.map((label, index) => ({ label, index }))
+      : withRaw.series.map((s, index) => ({ label: s.name, index }))
 
-  // Wrap legend items into rows so `padTop` can reserve exactly the right space.
-  const legendRows = []
-  {
-    let row = []
-    let rowW = 0
-    for (const item of legendItems) {
-      const itemW = 16 + Math.min(item.label.length, 16) * 6.5 + 14
-      if (row.length && rowW + itemW > innerW) {
-        legendRows.push(row)
-        row = []
-        rowW = 0
-      }
-      row.push({ ...item, w: itemW })
-      rowW += itemW
-    }
-    if (row.length) legendRows.push(row)
-  }
-
+  const legendRows = legendLayout(legendItems, innerW)
   const legendStartY = hasTitle ? 36 : 18
   const padTop = legendStartY + Math.max(1, legendRows.length) * 16 + 2
   const padBottom = showZoom ? 48 : 24
   const plotW = Math.max(10, width - padLeft - padRight)
   const plotH = Math.max(10, H - padTop - padBottom)
+
+  const onKeyDown = event => {
+    if (n <= 0) return
+    let next = active
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+      next = active == null ? start : clamp(active + 1, start, start + span - 1)
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+      next = active == null ? start + span - 1 : clamp(active - 1, start, start + span - 1)
+    } else if (event.key === 'Home') {
+      next = start
+    } else if (event.key === 'End') {
+      next = start + span - 1
+    } else if (event.key === 'Escape') {
+      next = null
+    } else {
+      return
+    }
+    event.preventDefault()
+    setActive(next)
+  }
+
+  const onFocus = () => {
+    if (active == null && n > 0) setActive(start)
+  }
 
   const legendChildren = []
   legendRows.forEach((row, r) => {
@@ -327,38 +716,14 @@ function ChartWidget({ attrs }) {
   })
 
   const plotChildren = []
-  if (width > 0 && spec.kind === 'xy') {
-    const visible = spec.series.map((s, si) => ({ s, si })).filter(o => o.s.type !== 'pie' && !hidden[o.si])
+  if (width > 0 && withRaw.kind === 'xy') {
+    const visible = withRaw.series.map((s, si) => ({ s, si })).filter(o => o.s.type !== 'pie' && !hidden[o.si])
     const bandW = plotW / Math.max(1, span)
     const xCenter = j => padLeft + (j + 0.5) * bandW
-
-    let lo = 0
-    let hi = 0
-    let any = false
-    for (const o of visible) {
-      for (let j = 0; j < span; j += 1) {
-        const value = o.s.data[start + j]
-        if (!Number.isFinite(value)) continue
-        if (!any) {
-          lo = value
-          hi = value
-          any = true
-        } else {
-          if (value < lo) lo = value
-          if (value > hi) hi = value
-        }
-      }
-    }
-    if (!any) {
-      lo = 0
-      hi = 1
-    }
-    if (lo > 0) lo = 0
-    if (hi < 0) hi = 0
-    if (hi === lo) hi = lo + 1
-    const valuePad = (hi - lo) * 0.08
-    const yHi = hi + valuePad
-    const yLo = lo - valuePad
+    const extent = valueExtent(visible.map(o => ({ data: sWindow(o.s.data, start, span) })))
+    const valuePad = (extent.hi - extent.lo) * 0.08
+    const yHi = extent.hi + valuePad
+    const yLo = extent.lo - valuePad
     const yOf = value => padTop + ((yHi - value) / (yHi - yLo)) * plotH
 
     for (let t = 0; t <= 4; t += 1) {
@@ -389,9 +754,34 @@ function ChartWidget({ attrs }) {
           x: xCenter(j),
           y: padTop + plotH + 14,
           textAnchor: 'middle',
-          style: { fill: 'var(--ui-text-tertiary)', fontSize: 10 },
-          children: truncate(String(spec.categories[start + j]), 10)
+          style: {
+            fill: active != null && active - start === j ? 'var(--ui-text-primary)' : 'var(--ui-text-tertiary)',
+            fontSize: 10,
+            fontWeight: active != null && active - start === j ? 600 : 400
+          },
+          children: truncate(String(withRaw.categories[start + j]), 10)
         }, 'xlabel-' + j)
+      )
+    }
+
+    // Hover crosshair + band highlight, drawn under the series marks overlay.
+    if (active != null && active >= start && active < start + span) {
+      const j = active - start
+      plotChildren.push(
+        jsx('rect', {
+          x: padLeft + j * bandW,
+          y: padTop,
+          width: Math.max(1, bandW),
+          height: plotH,
+          style: { fill: 'var(--ui-accent)', opacity: 0.08 }
+        }, 'hover-band'),
+        jsx('line', {
+          x1: xCenter(j),
+          x2: xCenter(j),
+          y1: padTop,
+          y2: padTop + plotH,
+          style: { stroke: 'var(--ui-accent)', strokeWidth: 1, strokeDasharray: '3 3' }
+        }, 'crosshair')
       )
     }
 
@@ -412,7 +802,7 @@ function ChartWidget({ attrs }) {
             width: Math.max(1, barW * 0.92),
             height: Math.max(0.5, yBot - yTop),
             rx: 2,
-            style: { fill: colorAt(o.si) }
+            style: { fill: colorAt(o.si), opacity: active != null && active - start === j ? 1 : 0.92 }
           }, 'bar-' + o.si + '-' + j)
         )
       }
@@ -437,8 +827,26 @@ function ChartWidget({ attrs }) {
         )
       }
       points.forEach((p, i) => {
-        plotChildren.push(jsx('circle', { cx: p[0], cy: p[1], r: 2.5, style: { fill: colorAt(o.si) } }, 'pt-' + o.si + '-' + i))
+        plotChildren.push(
+          jsx('circle', { cx: p[0], cy: p[1], r: 2.5, style: { fill: colorAt(o.si) } }, 'pt-' + o.si + '-' + i)
+        )
       })
+    }
+
+    // Highlight ring on every visible series at the active category.
+    if (active != null && active >= start && active < start + span) {
+      for (const o of visible) {
+        const value = o.s.data[active]
+        if (!Number.isFinite(value)) continue
+        plotChildren.push(
+          jsx('circle', {
+            cx: xCenter(active - start),
+            cy: yOf(value),
+            r: 4.5,
+            style: { fill: 'var(--ui-bg-editor, transparent)', stroke: colorAt(o.si), strokeWidth: 2 }
+          }, 'hl-' + o.si)
+        )
+      }
     }
 
     if (visible.length === 0) {
@@ -462,14 +870,16 @@ function ChartWidget({ attrs }) {
         fill: 'transparent',
         style: { cursor: showZoom ? 'grab' : 'default' },
         onPointerDown: event => {
-          if (!showZoom) return
+          const j = clamp(Math.floor((event.nativeEvent.offsetX || 0) / Math.max(1, bandW)), 0, Math.max(0, span - 1))
+          setActive(start + j)
+          if (!showZoom || event.pointerType === 'touch') return
           dragRef.current = { x: event.clientX, start }
           if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId)
         },
         onPointerMove: event => {
           const offsetX = event.nativeEvent.offsetX
           const j = clamp(Math.floor(offsetX / Math.max(1, bandW)), 0, Math.max(0, span - 1))
-          setHover({ j, category: String(spec.categories[start + j]) })
+          setActive(start + j)
           const drag = dragRef.current
           if (drag) {
             const moved = Math.round(((event.clientX - drag.x) / Math.max(1, plotW)) * n)
@@ -483,14 +893,18 @@ function ChartWidget({ attrs }) {
         },
         onPointerLeave: () => {
           dragRef.current = null
-          setHover(null)
+          setActive(null)
         }
       }, 'overlay')
     )
   }
 
-  if (width > 0 && spec.kind === 'pie') {
-    const values = spec.series[0].data.map((v, i) => ({ label: spec.categories[i], value: Math.max(0, v), index: i }))
+  if (width > 0 && withRaw.kind === 'pie') {
+    const values = withRaw.series[0].data.map((v, i) => ({
+      label: withRaw.categories[i],
+      value: Math.max(0, v),
+      index: i
+    }))
     const total = values.reduce((sum, slice) => sum + (hidden[slice.index] ? 0 : slice.value), 0)
     const cx = width / 2
     const cy = padTop + plotH / 2
@@ -511,10 +925,20 @@ function ChartWidget({ attrs }) {
     for (const slice of values) {
       if (hidden[slice.index] || slice.value <= 0) continue
       const sweep = (slice.value / total) * Math.PI * 2
+      const isActive = active === slice.index
       plotChildren.push(
         jsx('path', {
           d: arcPath(cx, cy, radius, inner, angle, angle + sweep),
-          style: { fill: colorAt(slice.index), stroke: 'var(--ui-bg-editor, transparent)', strokeWidth: 1 }
+          style: {
+            fill: colorAt(slice.index),
+            stroke: 'var(--ui-bg-editor, transparent)',
+            strokeWidth: isActive ? 2 : 1,
+            opacity: active == null || isActive ? 1 : 0.55,
+            cursor: 'pointer'
+          },
+          onPointerEnter: () => setActive(slice.index),
+          onPointerLeave: () => setActive(null),
+          onPointerDown: () => setActive(slice.index)
         }, 'slice-' + slice.index)
       )
       angle += sweep
@@ -589,40 +1013,51 @@ function ChartWidget({ attrs }) {
   }
 
   let tooltip = null
-  if (hover && spec.kind === 'xy' && width > 0) {
-    const tooltipRows = spec.series
-      .map((s, si) => ({ s, si }))
-      .filter(o => !hidden[o.si])
-      .map(o => {
-        const value = o.s.data[start + hover.j]
-        return jsx('div', {
-          style: { display: 'flex', alignItems: 'center', gap: 4 },
-          children: [
-            jsx('span', { style: { width: 8, height: 8, borderRadius: 2, background: colorAt(o.si), display: 'inline-block' } }),
-            jsx('span', { children: o.s.name + ': ' + (Number.isFinite(value) ? formatTick(value) : '—') })
-          ]
-        }, 'tooltip-' + o.si)
+  if (active != null && width > 0 && active >= start && active < start + span) {
+    const tooltipRows = []
+    if (withRaw.kind === 'xy') {
+      withRaw.series.forEach((s, si) => {
+        if (hidden[si]) return
+        const value = s.data[active]
+        tooltipRows.push(
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 4 },
+            children: [
+              jsx('span', {
+                style: { width: 8, height: 8, borderRadius: 2, background: colorAt(si), display: 'inline-block' }
+              }),
+              jsx('span', { children: s.name + ': ' + (Number.isFinite(value) ? formatTick(value) : '—') })
+            ]
+          }, 'tooltip-' + si)
+        )
       })
-    tooltip = jsxs('div', {
-      style: {
-        position: 'absolute',
-        left: clamp(padLeft + (hover.j + 0.5) * (plotW / Math.max(1, span)) + 8, 4, Math.max(4, width - 150)),
-        top: 4,
-        pointerEvents: 'none',
-        background: 'var(--ui-bg-elevated, rgba(30,30,34,0.96))',
-        color: 'var(--ui-text-primary)',
-        border: '1px solid var(--ui-stroke-secondary)',
-        borderRadius: 6,
-        padding: '4px 8px',
-        fontSize: 11,
-        whiteSpace: 'nowrap',
-        zIndex: 5
-      },
-      children: [
-        jsx('div', { style: { fontWeight: 600, marginBottom: 2 }, children: hover.category }),
-        ...tooltipRows
-      ]
-    })
+    } else {
+      tooltipRows.push(jsx('div', { children: readoutFor(withRaw, active) }, 'tooltip-pie'))
+    }
+    if (tooltipRows.length) {
+      const bandW = plotW / Math.max(1, span)
+      const anchorX = withRaw.kind === 'xy' ? padLeft + (active - start + 0.5) * bandW : width / 2
+      tooltip = jsxs('div', {
+        style: {
+          position: 'absolute',
+          left: clamp(anchorX + 8, 4, Math.max(4, width - 150)),
+          top: 4,
+          pointerEvents: 'none',
+          background: 'var(--ui-bg-elevated, rgba(30,30,34,0.96))',
+          color: 'var(--ui-text-primary)',
+          border: '1px solid var(--ui-stroke-secondary)',
+          borderRadius: 6,
+          padding: '4px 8px',
+          fontSize: 11,
+          whiteSpace: 'nowrap',
+          zIndex: 5
+        },
+        children: [
+          jsx('div', { style: { fontWeight: 600, marginBottom: 2 }, children: String(withRaw.categories[active]) }),
+          ...tooltipRows
+        ]
+      })
+    }
   }
 
   const svgChildren = []
@@ -632,35 +1067,72 @@ function ChartWidget({ attrs }) {
         x: padLeft,
         y: 18,
         style: { fill: 'var(--ui-text-primary)', fontSize: 13, fontWeight: 600 },
-        children: spec.title
+        children: withRaw.title
       }, 'chart-title')
     )
   }
   svgChildren.push(...legendChildren, ...plotChildren, ...sliderChildren)
 
+  const seriesSummary = withRaw.kind === 'pie'
+    ? withRaw.series[0].name + '（' + withRaw.categories.length + ' 个切片）'
+    : withRaw.series.map(s => s.name).join('、')
+
   return jsxs('div', {
     ref: hostRef,
-    style: { position: 'relative', width: '100%', height: H + 'px', margin: '8px 0' },
+    tabIndex: 0,
+    role: 'group',
+    'aria-label': (hasTitle ? withRaw.title : '图表') + '（' + withRaw.kind + '），' + seriesSummary,
+    onKeyDown,
+    onFocus,
+    style: { width: '100%', margin: '8px 0', outline: 'none' },
     children: [
-      width > 0
-        ? jsxs('svg', {
-          ref: plotRef,
-          width,
-          height: H,
-          role: 'img',
-          'aria-label': (hasTitle ? spec.title : 'chart') + ' (' + spec.kind + ')',
-          style: { display: 'block', overflow: 'visible', fontFamily: 'inherit' },
-          children: svgChildren
-        }, 'chart-svg')
-        : null,
-      tooltip
+      jsxs('div', {
+        style: { position: 'relative', width: '100%', height: H + 'px' },
+        children: [
+          width > 0
+            ? jsxs('svg', {
+              ref: plotRef,
+              width,
+              height: H,
+              role: 'img',
+              'aria-label': (hasTitle ? withRaw.title : 'chart') + ' (' + withRaw.kind + ')',
+              style: { display: 'block', overflow: 'visible', fontFamily: 'inherit' },
+              children: svgChildren
+            }, 'chart-svg')
+            : null,
+          tooltip
+        ]
+      }),
+      jsx('div', {
+        'aria-live': 'polite',
+        style: {
+          marginTop: 2,
+          fontSize: 11,
+          color: active == null ? 'var(--ui-text-quaternary)' : 'var(--ui-text-secondary)',
+          minHeight: 16
+        },
+        children: readoutFor(withRaw, active)
+      }),
+      jsx('div', { style: visuallyHidden, children: readoutFor(withRaw, active) })
     ]
   })
 }
 
-function renderDirective(props) {
-  return jsx(ChartWidget, { attrs: props.attrs })
+/** Window a series' data to the current zoom view (pure helper for extent). */
+function sWindow(data, start, span) {
+  const out = []
+  for (let i = 0; i < span; i += 1) {
+    const value = data[start + i]
+    if (Number.isFinite(value)) out.push(value)
+  }
+  return out
 }
+
+function renderDirective(props) {
+  return jsx(ChartWidget, { attrs: props.attrs, source: props.source, streaming: props.streaming })
+}
+
+export { ChartWidget, readoutFor }
 
 export default {
   id: 'echarts-in-chat',
@@ -668,7 +1140,7 @@ export default {
   register(ctx) {
     ctx.register({
       id: 'echarts-directive',
-      area: TRANSCRIPT_DIRECTIVE_AREA,
+      area: sdk.TRANSCRIPT_DIRECTIVE_AREA,
       data: {
         name: 'echarts',
         render: renderDirective
