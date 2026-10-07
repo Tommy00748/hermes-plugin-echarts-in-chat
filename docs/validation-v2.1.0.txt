@@ -1,3 +1,26 @@
+echarts-in-chat v2.1.0 — English-first review follow-up
+Verified locally: 2026-10-07 (macOS, Node v26.9.0)
+
+Verification summary (not a captured console transcript):
+- node --test --test-reporter=tap tests/*.test.mjs: 73 passed, 0 failed,
+  0 skipped. The new locale tests were first run against the old implementation
+  and failed before the fix.
+- node --check desktop/plugin.js: passed.
+- git diff --check: passed.
+- hermes plugins validate . --install-deps: passed, including security scan
+  (safe), no core override and desktop SDK surface checks. The capability probe
+  is skipped because this desktop-only package has no Python __init__.py.
+- Browser smoke test using the real component and React 19.2.7 in Chromium:
+  35 cases passed across en-US, fr-FR, empty/missing language, zh, zh-CN and
+  zh-TW. Covered both aria labels, keyboard readouts, invalid data, copy success
+  and failure, streaming placeholder, and pie readouts. No uncaught browser
+  errors. The SDK directive-slot constant and clipboard were stubbed; this was
+  not an end-to-end test inside the Hermes Desktop host.
+
+The catalog pin and screenshot URL checks are recorded on the catalog PR,
+NousResearch/hermes-agent#133203, after publishing this plugin commit.
+
+--- Historical validation of 99400809 (before the i18n follow-up) ---
 echarts-in-chat v2.1.0 — 本机验收留档
 生成时间（本机）: 2026-10-05 15:58:30 CST
 Hermes: Hermes Agent vgit.be5e9f7 (2026.9.24) · upstream be5e9f72

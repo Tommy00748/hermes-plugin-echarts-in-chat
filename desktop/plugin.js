@@ -21,8 +21,8 @@
  * v2.1 NOTES
  *   - Hover tooltip now draws a crosshair + point highlight and has a keyboard /
  *     touch equivalent (arrow keys, tap, and an aria-live readout).
- *   - Invalid data renders a readable Chinese error block (naming which item does
- *     not line up) instead of a blank area, keeping the raw directive copyable.
+ *   - Invalid data renders a localized error block (English by default), naming
+ *     what does not line up and keeping the raw directive copyable.
  *   - Compact data syntax: `1..12` ranges and whitespace as a separator, on top of
  *     the original comma form. The old labels/values/series spelling still works.
  *
@@ -65,7 +65,87 @@ const MIN_SPAN = 2
 const MAX_CATEGORIES = 2000
 const MAX_RANGE = 1000
 const CHART_TYPES = ['bar', 'line', 'pie']
-const TYPE_HELP = 'bar、line、pie'
+// Kept in this file because Desktop plugins cannot import sibling modules.
+// Chinese locales share the zh table; all other locales fall back to English.
+const STRINGS = {
+  en: {
+    rangeLimit: (token, count, limit) => `Range "${token}" expands to ${count} points, exceeding the limit of ${limit}`,
+    categoryLimit: (count, limit) => `There are ${count} categories; only the first ${limit} will be rendered`,
+    badType: type => `type "${type}" is invalid; use: bar, line, pie`,
+    emptySeries: 'series is empty',
+    malformedSeries: (index, entry) => `series entry ${index} "${entry}" is missing data; expected "name:type:data" or "name:data"`,
+    defaultSeries: index => `Series ${index}`,
+    badSeriesType: (name, type) => `Type "${type}" for series "${name}" is invalid; use: bar, line, pie`,
+    badSeriesNumber: (name, token) => `"${token}" in series "${name}" is not a number`,
+    noSeriesNumbers: name => `series "${name}" has no usable numbers`,
+    badValue: token => `"${token}" in values is not a number`,
+    defaultValue: 'Value',
+    noValues: 'values has no usable numbers',
+    noData: 'No data: provide values or series, e.g. ::echarts{labels="Mon,Tue" values="1,2"}',
+    valuesMismatch: (labels, values) => `labels has ${labels} items, but values has ${values}`,
+    seriesMismatch: (labels, name, values) => `labels has ${labels} items, but series "${name}" has ${values}`,
+    badHeight: (height, fallback) => `height "${height}" is not a number; using the default of ${fallback}`,
+    streaming: 'echarts: Reading chart data…',
+    copyIdle: 'Copy original directive',
+    copyDone: 'Copied',
+    copyFail: 'Copy failed; select the text manually',
+    errorHeading: 'echarts: Cannot render chart because the data is invalid',
+    rawDirective: 'Original directive (select or copy it to correct the data):',
+    readoutSummary: (categories, count, pie) => `${categories} ${categories === 1 ? 'category' : 'categories'}, ${count} ${pie ? (count === 1 ? 'slice' : 'slices') : 'series'}. Hover a data point, or focus with Tab and press ← / → to inspect values.`,
+    valueReadout: (name, value) => `${name}: ${value}`,
+    share: percent => ` (${percent}%)`,
+    listSeparator: ', ',
+    allHidden: 'All series hidden',
+    emptyPie: 'No data',
+    chart: 'Chart',
+    pieSummary: (name, count) => `${name} (${count} ${count === 1 ? 'slice' : 'slices'})`,
+    chartLabel: (title, kind) => `${title} (${kind})`,
+    groupLabel: (label, series) => `${label}, ${series}`
+  },
+  zh: {
+    rangeLimit: (token, count, limit) => `区间「${token}」展开后有 ${count} 个点，超过上限 ${limit}`,
+    categoryLimit: (count, limit) => `分类有 ${count} 个，只渲染前 ${limit} 个`,
+    badType: type => `type 属性「${type}」不是合法类型，可用：bar、line、pie`,
+    emptySeries: 'series 属性是空的',
+    malformedSeries: (index, entry) => `series 第 ${index} 段「${entry}」缺少数据，格式应为「名称:类型:数据」或「名称:数据」`,
+    defaultSeries: index => `系列 ${index}`,
+    badSeriesType: (name, type) => `series「${name}」的类型「${type}」不是合法类型，可用：bar、line、pie`,
+    badSeriesNumber: (name, token) => `series「${name}」里的「${token}」不是数字`,
+    noSeriesNumbers: name => `series「${name}」里没有可用的数字`,
+    badValue: token => `values 里的「${token}」不是数字`,
+    defaultValue: '数值',
+    noValues: 'values 里没有可用的数字',
+    noData: '没有数据：请给 values 或 series，例如 ::echarts{labels="Mon,Tue" values="1,2"}',
+    valuesMismatch: (labels, values) => `labels 有 ${labels} 个，values 有 ${values} 个`,
+    seriesMismatch: (labels, name, values) => `labels 有 ${labels} 个，series「${name}」有 ${values} 个`,
+    badHeight: (height, fallback) => `height「${height}」不是数字，已使用默认 ${fallback}`,
+    streaming: 'echarts：正在读取图表数据…',
+    copyIdle: '复制原始指令',
+    copyDone: '已复制',
+    copyFail: '复制失败，请手动选中',
+    errorHeading: 'echarts：图表数据有问题，暂不能绘制',
+    rawDirective: '原始指令（可选中或复制后修正）：',
+    readoutSummary: (categories, count, pie) => `共 ${categories} 个分类、${count} ${pie ? '个切片' : '条系列'}。悬停数据点，或用 Tab 聚焦后按 ← / → 查看数值。`,
+    valueReadout: (name, value) => `${name}：${value}`,
+    share: percent => `（${percent}%）`,
+    listSeparator: '，',
+    allHidden: '所有系列已隐藏',
+    emptyPie: '暂无数据',
+    chart: '图表',
+    pieSummary: (name, count) => `${name}（${count} 个切片）`,
+    chartLabel: (title, kind) => `${title}（${kind}）`,
+    groupLabel: (label, series) => `${label}，${series}`
+  }
+}
+
+function resolveLocale(locale) {
+  return typeof locale === 'string' && /^zh(?:-|$)/i.test(locale) ? 'zh' : 'en'
+}
+
+function textFor(locale, key, ...args) {
+  const entry = STRINGS[resolveLocale(locale)][key] ?? STRINGS.en[key]
+  return typeof entry === 'function' ? entry(...args) : entry
+}
 
 // The theme's own categorical tokens, so the chart reskins with every theme and
 // no colour is ever hardcoded.
@@ -116,14 +196,14 @@ export function splitTokens(raw, options = {}) {
  * Returns `null` when the token is not a range, `{ values }` on success, or
  * `{ error }` when the range would expand past MAX_RANGE points.
  */
-export function expandRangeToken(token) {
+export function expandRangeToken(token, locale = 'en') {
   const match = /^(-?\d+)\s*\.\.\s*(-?\d+)$/.exec(String(token == null ? '' : token).trim())
   if (!match) return null
   const from = Number(match[1])
   const to = Number(match[2])
   const count = Math.abs(to - from) + 1
   if (count > MAX_RANGE) {
-    return { error: `区间「${token}」展开后有 ${count} 个点，超过上限 ${MAX_RANGE}` }
+    return { error: textFor(locale, 'rangeLimit', token, count, MAX_RANGE) }
   }
   const step = from <= to ? 1 : -1
   const values = []
@@ -135,11 +215,11 @@ export function expandRangeToken(token) {
  * Parse a number list, expanding ranges. Returns `{ values, bad }` where each
  * `bad` entry is `{ token, reason }` (reason is null for a plain parse failure).
  */
-export function parseNumberList(raw) {
+export function parseNumberList(raw, locale = 'en') {
   const values = []
   const bad = []
   for (const token of splitTokens(raw)) {
-    const range = expandRangeToken(token)
+    const range = expandRangeToken(token, locale)
     if (range) {
       if (range.error) bad.push({ token, reason: range.error })
       else values.push(...range.values)
@@ -153,11 +233,11 @@ export function parseNumberList(raw) {
 }
 
 /** Parse a label list, expanding numeric ranges and bounding the count. */
-export function parseLabelList(raw) {
+export function parseLabelList(raw, locale = 'en') {
   const labels = []
   const warnings = []
   for (const token of splitTokens(raw, { label: true })) {
-    const range = expandRangeToken(token)
+    const range = expandRangeToken(token, locale)
     if (range && !range.error) {
       for (const value of range.values) labels.push(String(value))
       continue
@@ -166,7 +246,7 @@ export function parseLabelList(raw) {
     else labels.push(token)
   }
   if (labels.length > MAX_CATEGORIES) {
-    warnings.push(`分类有 ${labels.length} 个，只渲染前 ${MAX_CATEGORIES} 个`)
+    warnings.push(textFor(locale, 'categoryLimit', labels.length, MAX_CATEGORIES))
     labels.length = MAX_CATEGORIES
   }
   return { labels, warnings }
@@ -188,16 +268,16 @@ export function serializeDirective(attrs) {
  * Turn the directive attributes into a chart spec. Pure and synchronous.
  *
  * Returns `{ ok: true, ...spec }` or `{ ok: false, errors, warnings, attrs }`,
- * where each error carries a user-facing Chinese `message`. The spec always
- * includes `errors`, `warnings` and `key` so callers can branch on `ok` alone.
+ * Each error carries a localized `message` (English by default). The spec
+ * always includes `errors`, `warnings` and `key` so callers can branch on `ok` alone.
  */
-export function parseChartSpec(attrs) {
+export function parseChartSpec(attrs, locale = 'en') {
   const a = attrs || {}
   const errors = []
   const warnings = []
 
   // ── labels ──────────────────────────────────────────────────────────────
-  const labelResult = parseLabelList(a.labels)
+  const labelResult = parseLabelList(a.labels, locale)
   const labels = labelResult.labels
   warnings.push(...labelResult.warnings)
 
@@ -207,7 +287,7 @@ export function parseChartSpec(attrs) {
   if (rawDefaultType) {
     const type = rawDefaultType.toLowerCase()
     if (CHART_TYPES.includes(type)) defaultType = type
-    else errors.push({ code: 'bad-type', message: `type 属性「${rawDefaultType}」不是合法类型，可用：${TYPE_HELP}` })
+    else errors.push({ code: 'bad-type', message: textFor(locale, 'badType', rawDefaultType) })
   }
 
   // ── single series vs multi series ───────────────────────────────────────
@@ -220,17 +300,17 @@ export function parseChartSpec(attrs) {
       .split(';')
       .map(entry => entry.trim())
       .filter(entry => entry.length > 0)
-    if (!entries.length) errors.push({ code: 'bad-series', message: 'series 属性是空的' })
+    if (!entries.length) errors.push({ code: 'bad-series', message: textFor(locale, 'emptySeries') })
     entries.forEach((entry, index) => {
       const parts = entry.split(':')
       if (parts.length < 2) {
         errors.push({
           code: 'bad-series',
-          message: `series 第 ${index + 1} 段「${entry}」缺少数据，格式应为「名称:类型:数据」或「名称:数据」`
+          message: textFor(locale, 'malformedSeries', index + 1, entry)
         })
         return
       }
-      const name = parts[0].trim() || `Series ${series.length + 1}`
+      const name = parts[0].trim() || textFor(locale, 'defaultSeries', series.length + 1)
       let type = defaultType
       let body
       if (parts.length >= 3) {
@@ -238,40 +318,40 @@ export function parseChartSpec(attrs) {
         if (rawType) {
           const lower = rawType.toLowerCase()
           if (CHART_TYPES.includes(lower)) type = lower
-          else errors.push({ code: 'bad-type', message: `series「${name}」的类型「${rawType}」不是合法类型，可用：${TYPE_HELP}` })
+          else errors.push({ code: 'bad-type', message: textFor(locale, 'badSeriesType', name, rawType) })
         }
         body = parts.slice(2).join(':')
       } else {
         body = parts[1]
       }
-      const parsed = parseNumberList(body)
+      const parsed = parseNumberList(body, locale)
       parsed.bad.forEach(item => {
         errors.push({
           code: 'bad-number',
-          message: item.reason || `series「${name}」里的「${item.token}」不是数字`
+          message: item.reason || textFor(locale, 'badSeriesNumber', name, item.token)
         })
       })
       if (parsed.values.length) series.push({ name, type, data: parsed.values })
-      else errors.push({ code: 'no-data', message: `series「${name}」里没有可用的数字` })
+      else errors.push({ code: 'no-data', message: textFor(locale, 'noSeriesNumbers', name) })
     })
   } else if (hasValues) {
-    const parsed = parseNumberList(a.values)
+    const parsed = parseNumberList(a.values, locale)
     parsed.bad.forEach(item => {
       errors.push({
         code: 'bad-number',
-        message: item.reason || `values 里的「${item.token}」不是数字`
+        message: item.reason || textFor(locale, 'badValue', item.token)
       })
     })
     if (parsed.values.length) {
-      const name = String(a.name == null ? '' : a.name).trim() || 'Value'
+      const name = String(a.name == null ? '' : a.name).trim() || textFor(locale, 'defaultValue')
       series.push({ name, type: defaultType, data: parsed.values })
     } else {
-      errors.push({ code: 'no-data', message: 'values 里没有可用的数字' })
+      errors.push({ code: 'no-data', message: textFor(locale, 'noValues') })
     }
   } else {
     errors.push({
       code: 'no-data',
-      message: '没有数据：请给 values 或 series，例如 ::echarts{labels="Mon,Tue" values="1,2"}'
+      message: textFor(locale, 'noData')
     })
   }
 
@@ -279,13 +359,11 @@ export function parseChartSpec(attrs) {
   if (labels.length) {
     for (const s of series) {
       if (s.data.length !== labels.length) {
-        const subject = series.length === 1 && !hasSeries ? 'values' : `series「${s.name}」`
-        // Latin subject (`values`) takes a space before the CJK verb; the
-        // bracketed series form does not.
-        const joiner = /[A-Za-z0-9]$/.test(subject) ? ' ' : ''
         errors.push({
           code: 'length-mismatch',
-          message: `labels 有 ${labels.length} 个，${subject}${joiner}有 ${s.data.length} 个`
+          message: series.length === 1 && !hasSeries
+            ? textFor(locale, 'valuesMismatch', labels.length, s.data.length)
+            : textFor(locale, 'seriesMismatch', labels.length, s.name, s.data.length)
         })
       }
     }
@@ -311,7 +389,7 @@ export function parseChartSpec(attrs) {
 
   const height = clamp(toNumber(a.height, DEFAULT_H), MIN_H, MAX_H)
   if (a.height != null && String(a.height).trim() !== '' && !Number.isFinite(Number(a.height))) {
-    warnings.push(`height「${a.height}」不是数字，已使用默认 ${DEFAULT_H}`)
+    warnings.push(textFor(locale, 'badHeight', a.height, DEFAULT_H))
   }
 
   const kind = defaultType === 'pie' || series.some(s => s.type === 'pie') ? 'pie' : 'xy'
@@ -464,7 +542,7 @@ const visuallyHidden = {
 }
 
 /** A readable, copyable failure block — never a blank area. */
-function ChartError({ spec, streaming }) {
+function ChartError({ spec, streaming, locale = 'en' }) {
   const [copyState, setCopyState] = useState('idle')
   const raw = spec.raw && spec.raw.trim() ? spec.raw : serializeDirective(spec.attrs)
 
@@ -472,7 +550,7 @@ function ChartError({ spec, streaming }) {
     return jsx('div', {
       className: 'rounded-md border px-3 py-2 text-xs',
       style: { borderColor: 'var(--ui-stroke-secondary)', color: 'var(--ui-text-tertiary)' },
-      children: 'echarts：正在读取图表数据…'
+      children: textFor(locale, 'streaming')
     })
   }
 
@@ -492,7 +570,7 @@ function ChartError({ spec, streaming }) {
     }
   }
 
-  const copyLabel = copyState === 'done' ? '已复制' : copyState === 'fail' ? '复制失败，请手动选中' : '复制原始指令'
+  const copyLabel = textFor(locale, copyState === 'done' ? 'copyDone' : copyState === 'fail' ? 'copyFail' : 'copyIdle')
 
   return jsxs('div', {
     role: 'alert',
@@ -508,7 +586,7 @@ function ChartError({ spec, streaming }) {
       jsx('div', {
         className: 'font-medium',
         style: { color: 'var(--ui-red, #ff6b6b)' },
-        children: 'echarts：图表数据有问题，暂不能绘制'
+        children: textFor(locale, 'errorHeading')
       }),
       jsxs('ul', {
         style: { margin: 0, paddingLeft: 18, display: 'grid', gap: 2 },
@@ -517,7 +595,7 @@ function ChartError({ spec, streaming }) {
       jsxs('div', {
         style: { display: 'grid', gap: 4 },
         children: [
-          jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: '原始指令（可选中或复制后修正）：' }),
+          jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: textFor(locale, 'rawDirective') }),
           jsx('pre', {
             style: {
               margin: 0,
@@ -553,11 +631,10 @@ function ChartError({ spec, streaming }) {
   })
 }
 
-function readoutFor(spec, active) {
+function readoutFor(spec, active, locale = 'en') {
   if (active == null || active < 0 || active >= spec.categories.length) {
     const seriesCount = spec.kind === 'pie' ? spec.categories.length : spec.series.length
-    const unit = spec.kind === 'pie' ? '个切片' : '条系列'
-    return `共 ${spec.categories.length} 个分类、${seriesCount} ${unit}。悬停数据点，或用 Tab 聚焦后按 ← / → 查看数值。`
+    return textFor(locale, 'readoutSummary', spec.categories.length, seriesCount, spec.kind === 'pie')
   }
   const category = String(spec.categories[active])
   if (spec.kind === 'pie') {
@@ -565,20 +642,21 @@ function readoutFor(spec, active) {
     const total = spec.series[0]
       ? spec.series[0].data.reduce((sum, v) => sum + (Number.isFinite(v) && v > 0 ? v : 0), 0)
       : 0
-    const share = total > 0 && Number.isFinite(value) ? '（' + ((value / total) * 100).toFixed(1) + '%）' : ''
-    return category + '：' + (Number.isFinite(value) ? formatTick(value) : '—') + share
+    const share = total > 0 && Number.isFinite(value) ? textFor(locale, 'share', ((value / total) * 100).toFixed(1)) : ''
+    return textFor(locale, 'valueReadout', category, Number.isFinite(value) ? formatTick(value) : '—') + share
   }
   const parts = spec.series
     .map(s => {
       const value = s.data[active]
-      return s.name + '：' + (Number.isFinite(value) ? formatTick(value) : '—')
+      return textFor(locale, 'valueReadout', s.name, Number.isFinite(value) ? formatTick(value) : '—')
     })
-    .join('，')
+    .join(textFor(locale, 'listSeparator'))
   return category + ' — ' + parts
 }
 
 function ChartWidget({ attrs, source, streaming }) {
-  const spec = useMemo(() => parseChartSpec(attrs), [attrs])
+  const locale = resolveLocale(typeof navigator !== 'undefined' ? navigator.language : undefined)
+  const spec = useMemo(() => parseChartSpec(attrs, locale), [attrs, locale])
   const withRaw = spec.ok ? spec : { ...spec, raw: source }
   const hostRef = useRef(null)
   const plotRef = useRef(null)
@@ -634,7 +712,7 @@ function ChartWidget({ attrs, source, streaming }) {
   }, [showZoom, start, span, minSpan, n])
 
   if (!withRaw.ok) {
-    return jsx(ChartError, { spec: withRaw, streaming })
+    return jsx(ChartError, { spec: withRaw, streaming, locale })
   }
 
   const toggle = index => setHidden(prev => ({ ...prev, [index]: !prev[index] }))
@@ -856,7 +934,7 @@ function ChartWidget({ attrs, source, streaming }) {
           y: padTop + plotH / 2,
           textAnchor: 'middle',
           style: { fill: 'var(--ui-text-quaternary)', fontSize: 11 },
-          children: 'All series hidden'
+          children: textFor(locale, 'allHidden')
         }, 'empty')
       )
     }
@@ -918,7 +996,7 @@ function ChartWidget({ attrs, source, streaming }) {
           y: cy,
           textAnchor: 'middle',
           style: { fill: 'var(--ui-text-quaternary)', fontSize: 11 },
-          children: 'No data'
+          children: textFor(locale, 'emptyPie')
         }, 'pie-empty')
       )
     }
@@ -1026,13 +1104,13 @@ function ChartWidget({ attrs, source, streaming }) {
               jsx('span', {
                 style: { width: 8, height: 8, borderRadius: 2, background: colorAt(si), display: 'inline-block' }
               }),
-              jsx('span', { children: s.name + ': ' + (Number.isFinite(value) ? formatTick(value) : '—') })
+              jsx('span', { children: textFor(locale, 'valueReadout', s.name, Number.isFinite(value) ? formatTick(value) : '—') })
             ]
           }, 'tooltip-' + si)
         )
       })
     } else {
-      tooltipRows.push(jsx('div', { children: readoutFor(withRaw, active) }, 'tooltip-pie'))
+      tooltipRows.push(jsx('div', { children: readoutFor(withRaw, active, locale) }, 'tooltip-pie'))
     }
     if (tooltipRows.length) {
       const bandW = plotW / Math.max(1, span)
@@ -1074,14 +1152,15 @@ function ChartWidget({ attrs, source, streaming }) {
   svgChildren.push(...legendChildren, ...plotChildren, ...sliderChildren)
 
   const seriesSummary = withRaw.kind === 'pie'
-    ? withRaw.series[0].name + '（' + withRaw.categories.length + ' 个切片）'
-    : withRaw.series.map(s => s.name).join('、')
+    ? textFor(locale, 'pieSummary', withRaw.series[0].name, withRaw.categories.length)
+    : withRaw.series.map(s => s.name).join(textFor(locale, 'listSeparator'))
+  const chartLabel = textFor(locale, 'chartLabel', hasTitle ? withRaw.title : textFor(locale, 'chart'), withRaw.kind)
 
   return jsxs('div', {
     ref: hostRef,
     tabIndex: 0,
     role: 'group',
-    'aria-label': (hasTitle ? withRaw.title : '图表') + '（' + withRaw.kind + '），' + seriesSummary,
+    'aria-label': textFor(locale, 'groupLabel', chartLabel, seriesSummary),
     onKeyDown,
     onFocus,
     style: { width: '100%', margin: '8px 0', outline: 'none' },
@@ -1095,7 +1174,7 @@ function ChartWidget({ attrs, source, streaming }) {
               width,
               height: H,
               role: 'img',
-              'aria-label': (hasTitle ? withRaw.title : 'chart') + ' (' + withRaw.kind + ')',
+              'aria-label': chartLabel,
               style: { display: 'block', overflow: 'visible', fontFamily: 'inherit' },
               children: svgChildren
             }, 'chart-svg')
@@ -1111,9 +1190,9 @@ function ChartWidget({ attrs, source, streaming }) {
           color: active == null ? 'var(--ui-text-quaternary)' : 'var(--ui-text-secondary)',
           minHeight: 16
         },
-        children: readoutFor(withRaw, active)
+        children: readoutFor(withRaw, active, locale)
       }),
-      jsx('div', { style: visuallyHidden, children: readoutFor(withRaw, active) })
+      jsx('div', { style: visuallyHidden, children: readoutFor(withRaw, active, locale) })
     ]
   })
 }

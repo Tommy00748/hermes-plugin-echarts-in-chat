@@ -45,7 +45,7 @@ Multi-series (bar and line can be mixed):
 ::echarts{labels="Mon,Tue,Wed,Thu,Fri" series="Sales:bar:120,200,150,80,70;Cost:line:60,90,70,40,35"}
 ````
 
-Pie / donut, taller, zoom always on:
+Pie / donut with a taller chart (pie charts do not support zoom):
 
 ````markdown
 ::echarts{labels="Direct,Search,Social,Email" values="420,310,180,90" type="pie" height="420"}
@@ -63,12 +63,12 @@ Compact syntax — integer ranges (`a..b`) and whitespace-separated numbers:
 |-----------|---------|
 | `labels`  | category names (x axis, or pie slice names); comma- **or** whitespace-separated |
 | `values`  | numbers — single series; comma- **or** whitespace-separated |
-| `name`    | single-series name (used with `values`) |
+| `name`    | single-series name (used with `values`; default `Value`, or `数值` in Chinese) |
 | `series`  | `name:type:v1,v2,...` entries separated by `;` — multi series |
 | `type`    | default series type for entries without one: `bar` \| `line` \| `pie` |
 | `title`   | optional chart title |
 | `height`  | optional pixel height, clamped to 280–560 (default 400) |
-| `zoom`    | `"true"` / `"false"` — the dataZoom slider (default: on when > 10 categories) |
+| `zoom`    | `"true"` / `"false"` — the dataZoom slider for bar/line charts (default: on when > 10 categories; no slider for 2 or fewer) |
 
 The host's directive grammar does not allow `{` or `}` inside the attribute
 body, so a raw ECharts option JSON cannot be passed; the values are given as
@@ -78,8 +78,9 @@ plain attribute lists instead.
 
 - **Ranges** — any token of the form `a..b` expands to every integer from `a` to
   `b`, inclusive, ascending or descending. Works in `values`, in a `series` body,
-  and in `labels` (`labels="1..12"`). A range longer than 1000 points is refused
-  with a readable error rather than allocated.
+  and in `labels` (`labels="1..12"`). A range longer than 1000 points is not
+  expanded: numeric data produces an error; labels skip the range and record a
+  parser warning.
 - **Whitespace separators** — numbers accept commas *or* whitespace
   interchangeably (`"1,2,3"` ≡ `"1 2 3"`). For `labels`, whitespace is a
   separator only when there is no comma, so a comma-separated list may still
@@ -87,25 +88,51 @@ plain attribute lists instead.
 - Fully backward compatible: the original `labels="Mon,Tue" values="1,2"` and
   `series="Sales:bar:1,2;Cost:line:3,4"` spellings are unchanged.
 
+### Language
+
+Plugin-generated text defaults to **English**. The widget reads
+`navigator.language`: `zh` and Chinese language tags such as `zh-CN` and `zh-TW`
+use the shared Chinese (`zh`, Simplified Chinese wording) string table.
+Missing or unrecognized locales, including environments without `navigator`,
+use English. A missing Chinese translation falls back to the English text for
+that key. This does not use the Hermes app's language setting.
+
+This applies to validation errors and parser warnings, the streaming placeholder,
+copy-button states, tooltips/readouts, both chart accessibility labels, generated
+series names (`Value` / `Series 1`, or `数值` / `系列 1`), and empty states.
+User-provided category labels, chart titles, series names, and raw directives are
+not translated.
+
 ### Errors (no blank charts)
 
-Bad data renders a readable Chinese error block in the chart's place, naming the
+Bad data renders a readable error block in the chart's place, naming the
 item that does not line up, with the raw directive kept selectable and copyable:
 
-- `labels 有 3 个，values 有 4 个` — length mismatch (single series or a named series)
-- `values 里的「abc」不是数字` — a token that does not parse
-- `type 属性「scatter」不是合法类型，可用：bar、line、pie` — illegal type
-- `series 第 1 段「…」缺少数据…` — a malformed series entry
-- `没有数据：请给 values 或 series…` — nothing to draw
+- `labels has 3 items, but values has 4` — single-series length mismatch
+- `labels has 2 items, but series "Cost" has 3` — named-series length mismatch
+- `"abc" in values is not a number` — a token that does not parse
+- `type "scatter" is invalid; use: bar, line, pie` — illegal type
+- `series entry 1 "oops" is missing data; expected "name:type:data" or "name:data"` — malformed series entry
+- `No data: provide values or series, e.g. ::echarts{labels="Mon,Tue" values="1,2"}` — nothing to draw
 
 While the message is still streaming and the directive is incomplete, a muted
-"正在读取图表数据…" placeholder is shown instead of a red error.
+"echarts: Reading chart data…" placeholder is shown instead of a red error.
+The copy button reads "Copy original directive", then "Copied" on success or
+"Copy failed; select the text manually" if clipboard access fails or is unavailable.
+Chinese locales show the corresponding Chinese text, for example
+`labels 有 3 个，values 有 4 个` and "echarts：正在读取图表数据…".
+
+Non-fatal parser warnings (such as an invalid height or skipped label range) are
+localized too and returned in `spec.warnings`; they are not currently displayed
+by the widget. With every series hidden, a bar/line chart shows "All series hidden";
+a pie chart with no positive visible values shows "No data" (both localized).
 
 ### Interactions
 
-- **Zoom (dataZoom)** — the slider under the plot: drag the window to pan,
+- **Zoom (dataZoom, bar/line only)** — the slider under the plot: drag the window to pan,
   drag either handle to resize, or scroll the wheel over the plot. Defaults on
-  for more than 10 categories.
+  for more than 10 categories; `zoom="true"` enables it with at least 3 categories.
+  Pie charts do not show a zoom slider.
 - **Legend filter** — click a legend item to hide/show that series or slice.
 - **Resize-aware** — a `ResizeObserver` on the chart's own element re-lays the
   SVG out when the message column changes width.
@@ -122,14 +149,20 @@ While the message is still streaming and the directive is incomplete, a muted
 ## Development
 
 ```bash
-node --test tests/          # parser + render-layer unit tests (zero dependencies)
+node --test tests/*.test.mjs # parser + render-layer + locale tests (zero dependencies)
 hermes plugins validate . --install-deps   # the catalog CI gate
 ```
 
 The parser is pure and lives inside `desktop/plugin.js` on purpose: a Desktop
 plugin may only import `@hermes/plugin-sdk` / `react*`, so it cannot import a
 sibling module. The tests load the real source with its three imports rewritten
-in a temp directory — see `tests/load-plugin.mjs`.
+in a temp directory — see `tests/load-plugin.mjs`. Parser helpers take an optional
+explicit locale (for example `parseChartSpec(attrs, 'zh-CN')`), defaulting to
+English independently of browser globals. The widget resolves its browser locale
+and passes it consistently to parsing and rendering. Tests cover English fallback,
+Chinese variants, every parser error/warning, copy success/failure, accessible
+readouts/labels, empty states, and preservation of user text. The render tests use
+stubbed React hooks, not a full browser or Desktop integration test.
 
 See [`UPGRADE-BACKLOG.md`](UPGRADE-BACKLOG.md) for the roadmap, the verified SDK
 capability boundaries (file access, network, image export, code-block hooks,

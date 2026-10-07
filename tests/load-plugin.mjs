@@ -24,7 +24,26 @@ const REACT_STUB = `
 export const useEffect = () => {}
 export const useMemo = fn => fn()
 export const useRef = value => ({ current: value === undefined ? null : value })
-export const useState = initial => [typeof initial === 'function' ? initial() : initial, () => {}]
+let current = null
+export const useState = initial => {
+  if (!current) return [typeof initial === 'function' ? initial() : initial, () => {}]
+  const store = current
+  const index = store.cursor++
+  if (!(index in store.values)) store.values[index] = typeof initial === 'function' ? initial() : initial
+  return [store.values[index], next => {
+    store.values[index] = typeof next === 'function' ? next(store.values[index]) : next
+  }]
+}
+// A controlled component render; effects/DOM remain stubbed. Seeds let tests
+// supply a measured width and zoom view without a browser ResizeObserver.
+export function createRenderer(Component, props, seeds = []) {
+  const store = { values: [...seeds], cursor: 0 }
+  return () => {
+    store.cursor = 0
+    current = store
+    try { return Component(props) } finally { current = null }
+  }
+}
 `
 
 const JSX_STUB = `
@@ -41,19 +60,20 @@ export function rewriteImports(source) {
     .replace(/from 'react'/g, "from './react-stub.mjs'")
 }
 
-export async function loadPlugin() {
+export async function loadPlugin({ exposeInternals = false } = {}) {
   const source = await readFile(pluginPath, 'utf8')
   const dir = await mkdtemp(join(tmpdir(), 'echarts-plugin-'))
   await writeFile(join(dir, 'sdk-stub.mjs'), SDK_STUB)
   await writeFile(join(dir, 'react-stub.mjs'), REACT_STUB)
   await writeFile(join(dir, 'jsx-runtime-stub.mjs'), JSX_STUB)
-  await writeFile(join(dir, 'plugin.mjs'), rewriteImports(source))
+  await writeFile(join(dir, 'plugin.mjs'), rewriteImports(source) + (exposeInternals ? '\nexport { STRINGS, textFor }' : ''))
   const mod = await import(pathToFileURL(join(dir, 'plugin.mjs')).href)
   // Keep the temp dir alive for the process lifetime; clean up on exit.
   process.once('exit', () => {
     rm(dir, { recursive: true, force: true }).catch(() => {})
   })
-  return mod
+  const { createRenderer } = await import(pathToFileURL(join(dir, 'react-stub.mjs')).href)
+  return { ...mod, createRenderer }
 }
 
 /** Depth-first text extraction from the stub element tree. */

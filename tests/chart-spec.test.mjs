@@ -1,6 +1,6 @@
 /**
  * Unit tests for the pure directive parser (issue: first upgrade round).
- * Run with: node --test tests/
+ * Run with: node --test tests/*.test.mjs
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
@@ -100,28 +100,28 @@ test('error: labels/values length mismatch names both counts', () => {
   const spec = parseChartSpec({ labels: 'Mon,Tue,Wed', values: '1,2,3,4' })
   assert.equal(spec.ok, false)
   const messages = spec.errors.map(e => e.message)
-  assert.ok(messages.some(m => m === 'labels 有 3 个，values 有 4 个'), JSON.stringify(messages))
+  assert.ok(messages.some(m => m === 'labels has 3 items, but values has 4'), JSON.stringify(messages))
 })
 
 test('error: series length mismatch names the offending series', () => {
   const spec = parseChartSpec({ labels: 'A,B', series: 'Sales:bar:1,2;Cost:line:1,2,3' })
   assert.equal(spec.ok, false)
   const messages = spec.errors.map(e => e.message)
-  assert.ok(messages.some(m => m === 'labels 有 2 个，series「Cost」有 3 个'), JSON.stringify(messages))
+  assert.ok(messages.some(m => m === 'labels has 2 items, but series "Cost" has 3'), JSON.stringify(messages))
 })
 
 test('error: unparsable number names the token', () => {
   const spec = parseChartSpec({ labels: 'A,B,C', values: '1,abc,3' })
   assert.equal(spec.ok, false)
   const messages = spec.errors.map(e => e.message)
-  assert.ok(messages.some(m => m === 'values 里的「abc」不是数字'), JSON.stringify(messages))
+  assert.ok(messages.some(m => m === '"abc" in values is not a number'), JSON.stringify(messages))
 })
 
 test('error: illegal type names it and lists the valid ones', () => {
   const spec = parseChartSpec({ labels: 'A,B', values: '1,2', type: 'scatter' })
   assert.equal(spec.ok, false)
   const messages = spec.errors.map(e => e.message)
-  assert.ok(messages.some(m => m.includes('scatter') && m.includes('bar、line、pie')), JSON.stringify(messages))
+  assert.ok(messages.some(m => m.includes('scatter') && m.includes('bar, line, pie')), JSON.stringify(messages))
 })
 
 test('error: illegal per-series type is reported too', () => {
@@ -139,13 +139,13 @@ test('error: no data at all is reported, never a blank spec', () => {
 test('error: malformed series entry names its position', () => {
   const spec = parseChartSpec({ labels: 'A', series: 'oops' })
   assert.equal(spec.ok, false)
-  assert.ok(spec.errors.some(e => e.message.includes('series 第 1 段')))
+  assert.ok(spec.errors.some(e => e.message.includes('series entry 1')))
 })
 
 test('guard: a huge range is refused, not expanded', () => {
   const spec = parseChartSpec({ values: '1..5000' })
   assert.equal(spec.ok, false)
-  assert.ok(spec.errors.some(e => e.message.includes('超过上限')))
+  assert.ok(spec.errors.some(e => e.message.includes('exceeding the limit')))
 })
 
 test('errors are deduplicated', () => {
